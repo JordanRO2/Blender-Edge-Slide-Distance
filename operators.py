@@ -288,18 +288,28 @@ class MESH_OT_edge_slide_by_distance(Operator):
         if not (parallel1 or parallel2):
             return None
         
+        # Calculate perpendicular distance, not just distance between centers
         edge_center = (edge.verts[0].co + edge.verts[1].co) / 2
+        edge_dir = (edge.verts[1].co - edge.verts[0].co).normalized()
         
         dist1 = 0
         dist2 = 0
         
         if parallel1:
+            # Project the distance onto the perpendicular direction
             p1_center = (parallel1.verts[0].co + parallel1.verts[1].co) / 2
-            dist1 = (p1_center - edge_center).length
+            to_parallel = p1_center - edge_center
+            # Get component perpendicular to edge direction
+            perpendicular = to_parallel - (to_parallel.dot(edge_dir) * edge_dir)
+            dist1 = perpendicular.length
         
         if parallel2:
+            # Project the distance onto the perpendicular direction
             p2_center = (parallel2.verts[0].co + parallel2.verts[1].co) / 2
-            dist2 = (p2_center - edge_center).length
+            to_parallel = p2_center - edge_center
+            # Get component perpendicular to edge direction
+            perpendicular = to_parallel - (to_parallel.dot(edge_dir) * edge_dir)
+            dist2 = perpendicular.length
         
         return {
             'positive': dist1 if dist1 > 0 else dist2,
@@ -309,25 +319,32 @@ class MESH_OT_edge_slide_by_distance(Operator):
     def get_general_slide_range(self, edge, face1, face2):
         """Get slide range for edge in non-quad topology"""
         edge_center = (edge.verts[0].co + edge.verts[1].co) / 2
+        edge_dir = (edge.verts[1].co - edge.verts[0].co).normalized()
         
-        # Find furthest vertices in each face
+        # Find perpendicular distance to furthest vertices in each face
         max_dist1 = 0
         max_dist2 = 0
         
         for vert in face1.verts:
             if vert not in edge.verts:
-                dist = (vert.co - edge_center).length
+                to_vert = vert.co - edge_center
+                # Get component perpendicular to edge direction
+                perpendicular = to_vert - (to_vert.dot(edge_dir) * edge_dir)
+                dist = perpendicular.length
                 max_dist1 = max(max_dist1, dist)
         
         for vert in face2.verts:
             if vert not in edge.verts:
-                dist = (vert.co - edge_center).length
+                to_vert = vert.co - edge_center
+                # Get component perpendicular to edge direction
+                perpendicular = to_vert - (to_vert.dot(edge_dir) * edge_dir)
+                dist = perpendicular.length
                 max_dist2 = max(max_dist2, dist)
         
-        # Conservative estimate
+        # Conservative estimate for non-quads
         return {
-            'positive': max_dist1 * 0.7,
-            'negative': max_dist2 * 0.7
+            'positive': max_dist1 * 0.8,
+            'negative': max_dist2 * 0.8
         }
     
     def find_opposite_edge_in_face(self, edge, face):
