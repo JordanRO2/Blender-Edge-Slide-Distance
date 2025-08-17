@@ -1,8 +1,7 @@
-
 import bpy
 import bmesh
 from bpy.types import Operator
-from bpy.props import FloatProperty, BoolProperty, EnumProperty, StringProperty
+from bpy.props import FloatProperty, BoolProperty, EnumProperty
 from mathutils import Vector
 import math
 
@@ -45,15 +44,12 @@ class MESH_OT_edge_slide_by_distance(Operator):
         name="Measure",
         description="How to measure the slide distance",
         items=[
-            ('AVERAGE', 'Average', 'Use average distance across the loop'),
-            ('MINIMUM', 'Minimum', 'Use minimum distance in the loop'),
-            ('MAXIMUM', 'Maximum', 'Use maximum distance in the loop'),
-            ('FIRST', 'First Selected', 'Use distance of first selected edge')
+            ('PERPENDICULAR', 'Perpendicular', 'Perpendicular distance to boundary'),
+            ('ALONG_SURFACE', 'Along Surface', 'Distance along the surface'),
+            ('AVERAGE', 'Average', 'Average of all edge distances')
         ],
-        default='AVERAGE'
+        default='PERPENDICULAR'
     )
-    
-    # Removed unit_system as Blender handles this automatically with unit='LENGTH'
     
     @classmethod
     def poll(cls, context):
@@ -81,7 +77,7 @@ class MESH_OT_edge_slide_by_distance(Operator):
         
         col = layout.column()
         
-        # Distance input - Blender automatically shows units based on scene settings
+        # Distance input
         col.prop(self, "distance")
         
         # Show current unit system
@@ -102,15 +98,15 @@ class MESH_OT_edge_slide_by_distance(Operator):
         col.separator()
         box = col.box()
         box.label(text="Tips:", icon='INFO')
-        box.label(text="• Positive: slide toward first boundary")
-        box.label(text="• Negative: slide toward opposite boundary")
-        box.label(text="• Even: maintains edge loop spacing")
+        box.label(text="• Positive: slide in one direction")
+        box.label(text="• Negative: slide in opposite direction")
+        box.label(text="• Works with any edge orientation")
     
     def execute(self, context):
         obj = context.active_object
         mesh = obj.data
         
-        # Store original selection
+        # Get BMesh
         bm = bmesh.from_edit_mesh(mesh)
         selected_edges = [e for e in bm.edges if e.select]
         
@@ -118,26 +114,18 @@ class MESH_OT_edge_slide_by_distance(Operator):
             self.report({'WARNING'}, "No edges selected")
             return {'CANCELLED'}
         
-        # The distance property already handles unit conversion when unit='LENGTH' is set
-        distance = self.distance
+        # Calculate the slide factor
+        factor = self.calculate_slide_factor(bm, selected_edges, self.distance)
         
-        # Calculate the slide range (max distance in each direction)
-        slide_data = self.analyze_edge_loop(bm, selected_edges)
-        
-        if not slide_data:
-            self.report({'WARNING'}, "Cannot analyze selected edge loop. Make sure you have a valid edge loop selected.")
+        if factor is None:
+            self.report({'WARNING'}, "Cannot calculate slide factor")
             return {'CANCELLED'}
         
-        # Calculate the factor based on distance
-        factor = self.distance_to_factor(slide_data['distances'], distance)
-        
-        # Report analysis with proper unit display
-        unit_scale = context.scene.unit_settings.scale_length
-        self.report({'INFO'}, f"Loop width: {slide_data['avg_width']:.4f} | Sliding: {distance:.4f} | Factor: {factor:.4f}")
+        # Report what we're doing
+        self.report({'INFO'}, f"Sliding {abs(self.distance):.4f} units | Factor: {factor:.4f}")
         
         # Execute Blender's native edge slide
         try:
-            # Call native edge slide with calculated factor
             bpy.ops.transform.edge_slide(
                 value=factor,
                 use_even=self.use_even,
@@ -147,242 +135,147 @@ class MESH_OT_edge_slide_by_distance(Operator):
                 snap=False,
                 release_confirm=True
             )
-            
         except Exception as e:
             self.report({'ERROR'}, f"Edge slide failed: {str(e)}")
             return {'CANCELLED'}
         
         return {'FINISHED'}
     
-    
-    def analyze_edge_loop(self, bm, selected_edges):
-        """Analyze the edge loop to determine slide distances"""
-        # Ensure we have a proper edge loop
-        if not self.is_edge_loop(selected_edges):
-            # Try to find edge loops within selection
-            loops = self.find_edge_loops(selected_edges)
-            if not loops:
-                return None
-            selected_edges = loops[0]  # Use first loop found
+    def calculate_slide_factor(self, bm, selected_edges, distance):
+        """Calculate the factor needed for the desired distance"""
         
-        distances = {'positive': [], 'negative': []}
-        widths = []
+        # Analyze the edge loop structure
+        slide_data = self.analyze_edge_slide(bm, selected_edges)
         
-        for edge in selected_edges:
-            # Get slide range for this edge
-            dist_data = self.get_edge_slide_range(bm, edge)
-            if dist_data:
-                distances['positive'].append(dist_data['positive'])
-                distances['negative'].append(dist_data['negative'])
-                widths.append(dist_data['positive'] + dist_data['negative'])
-        
-        if not distances['positive']:
+        if not slide_data:
             return None
         
-        # Aggregate based on measurement method
-        if self.measurement_method == 'AVERAGE':
-            result_distances = {
-                'positive': sum(distances['positive']) / len(distances['positive']),
-                'negative': sum(distances['negative']) / len(distances['negative'])
-            }
-        elif self.measurement_method == 'MINIMUM':
-            result_distances = {
-                'positive': min(distances['positive']),
-                'negative': min(distances['negative'])
-            }
-        elif self.measurement_method == 'MAXIMUM':
-            result_distances = {
-                'positive': max(distances['positive']),
-                'negative': max(distances['negative'])
-            }
-        else:  # FIRST
-            result_distances = {
-                'positive': distances['positive'][0],
-                'negative': distances['negative'][0]
-            }
-        
-        avg_width = sum(widths) / len(widths) if widths else 0
-        
-        return {
-            'distances': result_distances,
-            'avg_width': avg_width,
-            'edge_count': len(selected_edges)
-        }
-    
-    def is_edge_loop(self, edges):
-        """Check if edges form a proper loop"""
-        # Simple check: each vertex should connect to exactly 2 edges
-        vert_count = {}
-        for edge in edges:
-            for vert in edge.verts:
-                vert_count[vert] = vert_count.get(vert, 0) + 1
-        
-        # In a proper loop, each vertex appears exactly twice
-        return all(count == 2 for count in vert_count.values())
-    
-    def find_edge_loops(self, edges):
-        """Find edge loops within selected edges"""
-        loops = []
-        processed = set()
-        
-        for edge in edges:
-            if edge in processed:
-                continue
-            
-            loop = self.build_loop_from_edge(edge, edges, processed)
-            if loop and len(loop) > 2:
-                loops.append(loop)
-        
-        return loops
-    
-    def build_loop_from_edge(self, start_edge, all_edges, processed):
-        """Build an edge loop starting from given edge"""
-        loop = [start_edge]
-        processed.add(start_edge)
-        
-        # Follow loop in both directions
-        for direction in [0, 1]:
-            current_vert = start_edge.verts[direction]
-            prev_edge = start_edge
-            
-            while True:
-                # Find next edge in loop
-                next_edge = None
-                for edge in current_vert.link_edges:
-                    if edge in all_edges and edge not in processed:
-                        next_edge = edge
-                        break
-                
-                if not next_edge:
-                    break
-                
-                loop.append(next_edge)
-                processed.add(next_edge)
-                
-                # Move to next vertex
-                current_vert = next_edge.other_vert(current_vert)
-                prev_edge = next_edge
-        
-        return loop
-    
-    def get_edge_slide_range(self, bm, edge):
-        """Calculate the slide range for a single edge"""
-        # Edge must have exactly 2 faces to be slideable
-        if len(edge.link_faces) != 2:
-            return None
-        
-        face1, face2 = edge.link_faces
-        
-        # For quads, find parallel edges
-        if len(face1.edges) == 4 and len(face2.edges) == 4:
-            return self.get_quad_slide_range(edge, face1, face2)
-        else:
-            # Handle triangles and n-gons
-            return self.get_general_slide_range(edge, face1, face2)
-    
-    def get_quad_slide_range(self, edge, face1, face2):
-        """Get slide range for edge between two quads"""
-        parallel1 = self.find_opposite_edge_in_face(edge, face1)
-        parallel2 = self.find_opposite_edge_in_face(edge, face2)
-        
-        if not (parallel1 or parallel2):
-            return None
-        
-        # Calculate perpendicular distance, not just distance between centers
-        edge_center = (edge.verts[0].co + edge.verts[1].co) / 2
-        edge_dir = (edge.verts[1].co - edge.verts[0].co).normalized()
-        
-        dist1 = 0
-        dist2 = 0
-        
-        if parallel1:
-            # Project the distance onto the perpendicular direction
-            p1_center = (parallel1.verts[0].co + parallel1.verts[1].co) / 2
-            to_parallel = p1_center - edge_center
-            # Get component perpendicular to edge direction
-            perpendicular = to_parallel - (to_parallel.dot(edge_dir) * edge_dir)
-            dist1 = perpendicular.length
-        
-        if parallel2:
-            # Project the distance onto the perpendicular direction
-            p2_center = (parallel2.verts[0].co + parallel2.verts[1].co) / 2
-            to_parallel = p2_center - edge_center
-            # Get component perpendicular to edge direction
-            perpendicular = to_parallel - (to_parallel.dot(edge_dir) * edge_dir)
-            dist2 = perpendicular.length
-        
-        return {
-            'positive': dist1 if dist1 > 0 else dist2,
-            'negative': dist2 if dist2 > 0 else dist1
-        }
-    
-    def get_general_slide_range(self, edge, face1, face2):
-        """Get slide range for edge in non-quad topology"""
-        edge_center = (edge.verts[0].co + edge.verts[1].co) / 2
-        edge_dir = (edge.verts[1].co - edge.verts[0].co).normalized()
-        
-        # Find perpendicular distance to furthest vertices in each face
-        max_dist1 = 0
-        max_dist2 = 0
-        
-        for vert in face1.verts:
-            if vert not in edge.verts:
-                to_vert = vert.co - edge_center
-                # Get component perpendicular to edge direction
-                perpendicular = to_vert - (to_vert.dot(edge_dir) * edge_dir)
-                dist = perpendicular.length
-                max_dist1 = max(max_dist1, dist)
-        
-        for vert in face2.verts:
-            if vert not in edge.verts:
-                to_vert = vert.co - edge_center
-                # Get component perpendicular to edge direction
-                perpendicular = to_vert - (to_vert.dot(edge_dir) * edge_dir)
-                dist = perpendicular.length
-                max_dist2 = max(max_dist2, dist)
-        
-        # Conservative estimate for non-quads
-        return {
-            'positive': max_dist1 * 0.8,
-            'negative': max_dist2 * 0.8
-        }
-    
-    def find_opposite_edge_in_face(self, edge, face):
-        """Find the opposite edge in a face (for quads)"""
-        if len(face.edges) != 4:
-            return None
-        
-        edge_verts = set(edge.verts)
-        
-        for face_edge in face.edges:
-            if face_edge == edge:
-                continue
-            
-            # Opposite edge shares no vertices with our edge
-            if not (set(face_edge.verts) & edge_verts):
-                return face_edge
-        
-        return None
-    
-    def distance_to_factor(self, distances, distance):
-        """Convert distance to edge slide factor (-1 to 1)"""
-        # Determine which direction we're sliding
-        if distance >= 0:
-            max_dist = distances['positive']
-        else:
-            max_dist = distances['negative']
+        # Convert distance to factor based on measurement method
+        if self.measurement_method == 'PERPENDICULAR':
+            # Use perpendicular distance to boundaries
+            max_dist = slide_data['perpendicular_distance']
+        elif self.measurement_method == 'ALONG_SURFACE':
+            # Use distance along the surface
+            max_dist = slide_data['surface_distance']
+        else:  # AVERAGE
+            # Use average of all methods
+            max_dist = slide_data['average_distance']
         
         if max_dist == 0:
             return 0
         
-        # Calculate factor maintaining sign
+        # Calculate factor
+        # Positive distance = positive factor, negative distance = negative factor
         factor = distance / max_dist
         
-        # Clamp to valid range if requested
+        # Clamp if requested
         if self.use_clamp:
             factor = max(-1.0, min(1.0, factor))
         
         return factor
+    
+    def analyze_edge_slide(self, bm, selected_edges):
+        """Analyze the edge slide geometry"""
+        
+        # Find boundary edges (what we're sliding between)
+        boundaries = self.find_slide_boundaries(bm, selected_edges)
+        
+        if not boundaries:
+            return None
+        
+        # Calculate distances
+        perp_distances = []
+        surface_distances = []
+        
+        for edge in selected_edges:
+            # Skip edges that can't slide
+            if len(edge.link_faces) != 2:
+                continue
+            
+            # Calculate distance for this edge
+            dist_data = self.calculate_edge_distances(edge, boundaries)
+            if dist_data:
+                perp_distances.append(dist_data['perpendicular'])
+                surface_distances.append(dist_data['surface'])
+        
+        if not perp_distances:
+            return None
+        
+        # Aggregate distances
+        return {
+            'perpendicular_distance': sum(perp_distances) / len(perp_distances),
+            'surface_distance': sum(surface_distances) / len(surface_distances),
+            'average_distance': (sum(perp_distances) + sum(surface_distances)) / (2 * len(perp_distances))
+        }
+    
+    def find_slide_boundaries(self, bm, selected_edges):
+        """Find the boundary edges that we're sliding between"""
+        boundaries = []
+        
+        # Create a set for quick lookup
+        selected_set = set(selected_edges)
+        
+        for edge in selected_edges:
+            if len(edge.link_faces) != 2:
+                continue
+            
+            # Check each linked face for parallel edges
+            for face in edge.link_faces:
+                for face_edge in face.edges:
+                    if face_edge not in selected_set and face_edge != edge:
+                        # Check if this edge is roughly parallel
+                        if self.are_edges_parallel(edge, face_edge, threshold=0.8):
+                            boundaries.append(face_edge)
+        
+        return list(set(boundaries))  # Remove duplicates
+    
+    def are_edges_parallel(self, edge1, edge2, threshold=0.8):
+        """Check if two edges are roughly parallel"""
+        dir1 = (edge1.verts[1].co - edge1.verts[0].co).normalized()
+        dir2 = (edge2.verts[1].co - edge2.verts[0].co).normalized()
+        
+        # Check dot product (1 = parallel, -1 = anti-parallel, 0 = perpendicular)
+        dot = abs(dir1.dot(dir2))
+        return dot > threshold
+    
+    def calculate_edge_distances(self, edge, boundaries):
+        """Calculate distances from edge to boundaries"""
+        
+        if not boundaries:
+            return None
+        
+        edge_center = (edge.verts[0].co + edge.verts[1].co) / 2
+        edge_dir = (edge.verts[1].co - edge.verts[0].co).normalized()
+        
+        min_perp_dist = float('inf')
+        min_surface_dist = float('inf')
+        
+        for boundary in boundaries:
+            boundary_center = (boundary.verts[0].co + boundary.verts[1].co) / 2
+            
+            # Vector from edge to boundary
+            to_boundary = boundary_center - edge_center
+            
+            # Perpendicular distance (remove component along edge direction)
+            perp_component = to_boundary - (to_boundary.dot(edge_dir) * edge_dir)
+            perp_dist = perp_component.length
+            
+            # Surface distance (actual distance)
+            surface_dist = to_boundary.length
+            
+            # Keep track of minimum distances
+            if perp_dist < min_perp_dist:
+                min_perp_dist = perp_dist
+            if surface_dist < min_surface_dist:
+                min_surface_dist = surface_dist
+        
+        if min_perp_dist == float('inf'):
+            return None
+        
+        return {
+            'perpendicular': min_perp_dist,
+            'surface': min_surface_dist
+        }
 
 
 def register():
